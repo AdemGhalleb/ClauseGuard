@@ -35,12 +35,21 @@ def test_extractor_json_to_retrieved_rule_and_finding():
     assert "configured review policy" in finding["explanation"]
 
 
-def test_non_trigger_and_exception_produce_no_finding():
+def test_non_trigger_produces_no_finding():
     detector = ConcernDetector()
     below_threshold = detector.detect("non_compete", {"duration": "six months", "exceptions": []})
-    excepted = detector.detect("non_compete", {"duration": "five years", "exceptions": ["prior consent"]})
     assert below_threshold.findings == []
-    assert excepted.findings == []
+
+
+def test_extracted_exception_does_not_suppress_matching_finding():
+    detector = ConcernDetector()
+    excepted = detector.detect("non_compete", {"duration": "five years", "exceptions": ["prior consent"]})
+    assert len(excepted.findings) == 1
+    finding = excepted.findings[0]
+    assert finding.rule_id == "demo.non_compete.duration_over_12_months"
+    assert finding.exception_status == "extracted_unverified"
+    assert finding.exception_value == ["prior consent"]
+    assert finding.severity == "high"
 
 
 def test_invalid_extractor_json_is_reported_as_adapter_error():

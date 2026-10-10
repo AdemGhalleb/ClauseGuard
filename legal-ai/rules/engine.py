@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
@@ -19,6 +19,11 @@ RuleOutcome = Literal["matched", "not_matched", "could_not_evaluate"]
 MATCHED: RuleOutcome = "matched"
 NOT_MATCHED: RuleOutcome = "not_matched"
 COULD_NOT_EVALUATE: RuleOutcome = "could_not_evaluate"
+EXCEPTION_NOT_CONFIGURED = "not_configured"
+EXCEPTION_NOT_EXTRACTED = "not_extracted"
+EXCEPTION_EMPTY = "empty"
+EXCEPTION_COULD_NOT_EVALUATE = "could_not_evaluate"
+EXCEPTION_EXTRACTED_UNVERIFIED = "extracted_unverified"
 
 
 @dataclass(frozen=True)
@@ -110,13 +115,42 @@ class RuleEvaluation:
     outcome: RuleOutcome
     reason: str
     extracted_value: Any = None
+    exception_status: str = EXCEPTION_NOT_CONFIGURED
+    exception_field: str | None = None
+    exception_value: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
 
 
+def exception_state(rule: ConcernRule, facts: Mapping[str, Any]) -> tuple[str, str | None, Any]:
+    """Describe extracted exception text without judging legal applicability."""
+    field_name = rule.exception_field
+    if not field_name:
+        return EXCEPTION_NOT_CONFIGURED, None, None
+    if field_name not in facts:
+        return EXCEPTION_NOT_EXTRACTED, field_name, None
+    value = facts[field_name]
+    if value is None:
+        return EXCEPTION_COULD_NOT_EVALUATE, field_name, None
+    if not value:
+        return EXCEPTION_EMPTY, field_name, value
+    return EXCEPTION_EXTRACTED_UNVERIFIED, field_name, value
+
+
 def evaluate_rule(rule: ConcernRule, facts: Mapping[str, Any]) -> RuleEvaluation:
     """Evaluate one rule. Missing or malformed facts are could_not_evaluate, not a negative match."""
+    evaluation = _evaluate_condition(rule, facts)
+    status, field_name, value = exception_state(rule, facts)
+    return replace(
+        evaluation,
+        exception_status=status,
+        exception_field=field_name,
+        exception_value=value,
+    )
+
+
+def _evaluate_condition(rule: ConcernRule, facts: Mapping[str, Any]) -> RuleEvaluation:
     extracted = facts[rule.field] if rule.field in facts else None
     if rule.field not in facts:
         return RuleEvaluation(
@@ -230,6 +264,9 @@ class ConcernFinding:
     explanation: str
     evidence: Any
     source: str
+    exception_status: str = EXCEPTION_NOT_CONFIGURED
+    exception_field: str | None = None
+    exception_value: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
@@ -242,17 +279,23 @@ def evaluate_rules(
     *,
     evidence: Mapping[str, Any] | None = None,
 ) -> list[ConcernFinding]:
-    """Evaluate matching criteria and suppress a match when its exception field is populated."""
+    """Emit findings for matched rules. Extracted exceptions are recorded, not used to dismiss matches."""
     findings = []
     for rule in rules:
-        if rule.clause_type != clause_type or evaluate_rule(rule, facts).outcome != MATCHED:
+        evaluation = evaluate_rule(rule, facts)
+        if rule.clause_type != clause_type or evaluation.outcome != MATCHED:
             continue
-        if rule.exception_field:
-            exceptions = facts.get(rule.exception_field)
-            if exceptions:
-                continue
         raw = facts[rule.field]
         extracted = raw.get("raw", raw) if isinstance(raw, Mapping) else raw
+        explanation = (
+            f"The extracted value for {rule.field} matches a configured review criterion. "
+            "This is a potential concern according to the configured review policy."
+        )
+        if evaluation.exception_status == EXCEPTION_EXTRACTED_UNVERIFIED:
+            explanation += (
+                " An extracted exception is present, but its applicability has not been established "
+                "and it does not dismiss this finding."
+            )
         findings.append(ConcernFinding(
             rule_id=rule.rule_id,
             clause_type=clause_type,
@@ -261,10 +304,12 @@ def evaluate_rules(
             field=rule.field,
             extracted_value=extracted,
             rule_condition=rule.rule_condition,
-            explanation=(f"The extracted value for {rule.field} matches a configured review criterion. "
-                         "This is a potential concern according to the configured review policy."),
+            explanation=explanation,
             evidence=(evidence or {}).get(rule.field, extracted),
             source=rule.source,
+            exception_status=evaluation.exception_status,
+            exception_field=evaluation.exception_field,
+            exception_value=evaluation.exception_value,
         ))
     return findings
 

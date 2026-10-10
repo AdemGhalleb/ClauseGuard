@@ -191,9 +191,63 @@ def test_evaluator_emits_structured_finding():
     assert "potential concern" in result["explanation"]
 
 
-def test_evaluator_suppresses_populated_exception_and_wrong_category():
+def test_matching_rule_with_no_exception_field_is_not_configured():
+    rule = make_rule(exception_field=None)
+    findings = evaluate_rules("non_compete", {"duration": "five years"}, [rule])
+    assert len(findings) == 1
+    assert findings[0].exception_status == "not_configured"
+    assert findings[0].exception_value is None
+    assert findings[0].severity == "high"
+
+
+def test_matching_rule_with_nonempty_exception_is_preserved():
     rule = make_rule()
-    assert evaluate_rules("non_compete", {"duration": "five years", "exceptions": ["written consent"]}, [rule]) == []
+    facts = {"duration": "five years", "exceptions": ["written consent"]}
+    findings = evaluate_rules("non_compete", facts, [rule])
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.exception_status == "extracted_unverified"
+    assert finding.exception_field == "exceptions"
+    assert finding.exception_value == ["written consent"]
+    assert finding.severity == "high"
+    assert "applicability has not been established" in finding.explanation
+    assert "does not dismiss" in finding.explanation
+    assert finding.exception_status != "validated_applicable"
+
+
+def test_matching_rule_with_empty_exception_is_empty_not_extracted():
+    rule = make_rule()
+    findings = evaluate_rules("non_compete", {"duration": "five years", "exceptions": []}, [rule])
+    assert findings[0].exception_status == "empty"
+    assert findings[0].exception_value == []
+
+
+def test_matching_rule_with_missing_exception_field_is_not_extracted():
+    rule = make_rule()
+    findings = evaluate_rules("non_compete", {"duration": "five years"}, [rule])
+    assert findings[0].exception_status == "not_extracted"
+    assert findings[0].exception_value is None
+
+
+def test_null_exception_could_not_evaluate_is_distinct_from_missing():
+    rule = make_rule()
+    findings = evaluate_rules("non_compete", {"duration": "five years", "exceptions": None}, [rule])
+    assert findings[0].exception_status == "could_not_evaluate"
+    assert findings[0].exception_status != "not_extracted"
+
+
+def test_non_matching_rule_does_not_emit_finding_when_exception_is_populated():
+    rule = make_rule()
+    facts = {"duration": "six months", "exceptions": ["written consent"]}
+    assert evaluate_rules("non_compete", facts, [rule]) == []
+    evaluation = evaluate_rule(rule, facts)
+    assert evaluation.outcome == "not_matched"
+    assert evaluation.exception_status == "extracted_unverified"
+    assert evaluation.exception_value == ["written consent"]
+
+
+def test_wrong_category_is_not_evaluated():
+    rule = make_rule()
     assert evaluate_rules("confidentiality", {"duration": "five years"}, [rule]) == []
 
 
