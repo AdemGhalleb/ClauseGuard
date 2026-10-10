@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 
 
 SUPPORTED_OPERATORS = {
@@ -15,6 +15,10 @@ SUPPORTED_OPERATORS = {
     "is_true", "is_false", "is_not_empty",
 }
 SEVERITIES = {"info", "low", "medium", "high"}
+RuleOutcome = Literal["matched", "not_matched", "could_not_evaluate"]
+MATCHED: RuleOutcome = "matched"
+NOT_MATCHED: RuleOutcome = "not_matched"
+COULD_NOT_EVALUATE: RuleOutcome = "could_not_evaluate"
 
 
 @dataclass(frozen=True)
@@ -96,30 +100,122 @@ def _parse_duration(raw: str) -> dict[str, Any] | None:
     return {"value": int(match.group(1)), "unit": unit} if match else None
 
 
-def rule_matches(rule: ConcernRule, facts: Mapping[str, Any]) -> bool:
-    """Return whether one field satisfies a rule. Missing/malformed data is no match."""
-    if rule.field not in facts or facts[rule.field] is None:
-        return False
+@dataclass(frozen=True)
+class RuleEvaluation:
+    """Outcome of evaluating one configured rule against extracted facts."""
+
+    rule_id: str
+    clause_type: str
+    field: str
+    outcome: RuleOutcome
+    reason: str
+    extracted_value: Any = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+def evaluate_rule(rule: ConcernRule, facts: Mapping[str, Any]) -> RuleEvaluation:
+    """Evaluate one rule. Missing or malformed facts are could_not_evaluate, not a negative match."""
+    extracted = facts[rule.field] if rule.field in facts else None
+    if rule.field not in facts:
+        return RuleEvaluation(
+            rule_id=rule.rule_id,
+            clause_type=rule.clause_type,
+            field=rule.field,
+            outcome=COULD_NOT_EVALUATE,
+            reason=f"required field '{rule.field}' is missing",
+        )
+    if facts[rule.field] is None:
+        return RuleEvaluation(
+            rule_id=rule.rule_id,
+            clause_type=rule.clause_type,
+            field=rule.field,
+            outcome=COULD_NOT_EVALUATE,
+            reason=f"required field '{rule.field}' is null",
+            extracted_value=None,
+        )
     actual = facts[rule.field]
     expected = rule.value
+    op = rule.operator
     try:
         if rule.unit:
             actual = _duration_value(actual, rule.unit)
-        op = rule.operator
-        if op == "equals": return actual == expected
-        if op == "not_equals": return actual != expected
-        if op == "greater_than": return actual > expected
-        if op == "greater_than_or_equal": return actual >= expected
-        if op == "less_than": return actual < expected
-        if op == "less_than_or_equal": return actual <= expected
-        if op == "contains": return expected in actual
-        if op == "in": return actual in expected
-        if op == "is_true": return actual is True
-        if op == "is_false": return actual is False
-        if op == "is_not_empty": return bool(actual)
-    except (TypeError, ValueError, KeyError):
-        return False
-    return False
+        if op == "equals":
+            matched = actual == expected
+        elif op == "not_equals":
+            matched = actual != expected
+        elif op == "greater_than":
+            matched = actual > expected
+        elif op == "greater_than_or_equal":
+            matched = actual >= expected
+        elif op == "less_than":
+            matched = actual < expected
+        elif op == "less_than_or_equal":
+            matched = actual <= expected
+        elif op == "contains":
+            matched = expected in actual
+        elif op == "in":
+            matched = actual in expected
+        elif op == "is_true":
+            matched = actual is True
+        elif op == "is_false":
+            matched = actual is False
+        elif op == "is_not_empty":
+            matched = bool(actual)
+        else:
+            raise ValueError(f"unsupported operator: {op}")
+    except ValueError as exc:
+        if str(exc).startswith("unsupported operator"):
+            raise
+        return RuleEvaluation(
+            rule_id=rule.rule_id,
+            clause_type=rule.clause_type,
+            field=rule.field,
+            outcome=COULD_NOT_EVALUATE,
+            reason=f"extracted value for '{rule.field}' is malformed or unsupported",
+            extracted_value=extracted,
+        )
+    except (TypeError, KeyError):
+        return RuleEvaluation(
+            rule_id=rule.rule_id,
+            clause_type=rule.clause_type,
+            field=rule.field,
+            outcome=COULD_NOT_EVALUATE,
+            reason=f"extracted value for '{rule.field}' is malformed or unsupported",
+            extracted_value=extracted,
+        )
+    if matched:
+        return RuleEvaluation(
+            rule_id=rule.rule_id,
+            clause_type=rule.clause_type,
+            field=rule.field,
+            outcome=MATCHED,
+            reason="condition is satisfied",
+            extracted_value=extracted,
+        )
+    return RuleEvaluation(
+        rule_id=rule.rule_id,
+        clause_type=rule.clause_type,
+        field=rule.field,
+        outcome=NOT_MATCHED,
+        reason="required facts are available and the condition is not satisfied",
+        extracted_value=extracted,
+    )
+
+
+def rule_matches(rule: ConcernRule, facts: Mapping[str, Any]) -> bool:
+    """Return True only when extracted facts are sufficient and satisfy the rule."""
+    return evaluate_rule(rule, facts).outcome == MATCHED
+
+
+def evaluate_all_rules(
+    clause_type: str,
+    facts: Mapping[str, Any],
+    rules: Sequence[ConcernRule],
+) -> list[RuleEvaluation]:
+    """Evaluate every applicable configured rule independently of retrieval ranking."""
+    return [evaluate_rule(rule, facts) for rule in rules if rule.clause_type == clause_type]
 
 
 @dataclass(frozen=True)
@@ -149,7 +245,7 @@ def evaluate_rules(
     """Evaluate matching criteria and suppress a match when its exception field is populated."""
     findings = []
     for rule in rules:
-        if rule.clause_type != clause_type or not rule_matches(rule, facts):
+        if rule.clause_type != clause_type or evaluate_rule(rule, facts).outcome != MATCHED:
             continue
         if rule.exception_field:
             exceptions = facts.get(rule.exception_field)

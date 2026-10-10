@@ -4,11 +4,14 @@ from importlib import import_module
 
 import pytest
 
-ConcernRule = import_module("legal-ai.rules.engine").ConcernRule
-rule_matches = import_module("legal-ai.rules.engine").rule_matches
-evaluate_rules = import_module("legal-ai.rules.engine").evaluate_rules
-load_rules = import_module("legal-ai.rules.engine").load_rules
-InMemoryRuleStore = import_module("legal-ai.rules.engine").InMemoryRuleStore
+engine = import_module("legal-ai.rules.engine")
+ConcernRule = engine.ConcernRule
+rule_matches = engine.rule_matches
+evaluate_rule = engine.evaluate_rule
+evaluate_rules = engine.evaluate_rules
+evaluate_all_rules = engine.evaluate_all_rules
+load_rules = engine.load_rules
+InMemoryRuleStore = engine.InMemoryRuleStore
 
 
 def make_rule(**overrides):
@@ -77,11 +80,103 @@ def test_membership_boolean_and_nonempty_operators():
     assert rule_matches(make_rule(operator="is_not_empty", value=None, unit=None), {"duration": ["x"]})
 
 
-def test_missing_null_and_malformed_values_do_not_match():
+def test_matching_condition_is_matched():
+    evaluation = evaluate_rule(make_rule(), {"duration": "18 months"})
+    assert evaluation.outcome == "matched"
+    assert evaluation.reason == "condition is satisfied"
+    assert evaluation.extracted_value == "18 months"
+
+
+def test_valid_non_matching_condition_is_not_matched():
+    evaluation = evaluate_rule(make_rule(), {"duration": "six months"})
+    assert evaluation.outcome == "not_matched"
+    assert "condition is not satisfied" in evaluation.reason
+    assert evaluation.extracted_value == "six months"
+    assert not rule_matches(make_rule(), {"duration": "six months"})
+
+
+def test_missing_field_could_not_evaluate():
+    evaluation = evaluate_rule(make_rule(), {})
+    assert evaluation.outcome == "could_not_evaluate"
+    assert evaluation.reason == "required field 'duration' is missing"
+    assert evaluation.extracted_value is None
+    assert not rule_matches(make_rule(), {})
+
+
+def test_null_field_could_not_evaluate():
+    evaluation = evaluate_rule(make_rule(), {"duration": None})
+    assert evaluation.outcome == "could_not_evaluate"
+    assert evaluation.reason == "required field 'duration' is null"
+    assert evaluation.extracted_value is None
+
+
+def test_malformed_duration_could_not_evaluate():
+    evaluation = evaluate_rule(make_rule(), {"duration": "an extended period"})
+    assert evaluation.outcome == "could_not_evaluate"
+    assert "malformed or unsupported" in evaluation.reason
+    assert evaluation.extracted_value == "an extended period"
+
+
+@pytest.mark.parametrize("overrides,facts,malformed", [
+    ({"operator": "greater_than"}, {"duration": object()}, True),
+    ({"operator": "greater_than_or_equal"}, {}, False),
+    ({"operator": "less_than"}, {"duration": None}, False),
+    ({"operator": "less_than_or_equal", "unit": None, "value": 10}, {"duration": {"nested": True}}, True),
+    ({"operator": "equals", "value": "worldwide", "unit": None}, {}, False),
+    ({"operator": "not_equals", "value": "local", "unit": None}, {"duration": None}, False),
+    ({"operator": "contains", "value": "client", "unit": None}, {"duration": 12}, True),
+    ({"operator": "in", "value": ["worldwide"], "unit": None}, {}, False),
+    ({"operator": "is_true", "value": None, "unit": None}, {"duration": None}, False),
+    ({"operator": "is_false", "value": None, "unit": None}, {}, False),
+    ({"operator": "is_not_empty", "value": None, "unit": None}, {"duration": None}, False),
+])
+def test_operator_families_do_not_treat_insufficient_facts_as_not_matched(overrides, facts, malformed):
+    evaluation = evaluate_rule(make_rule(**overrides), facts)
+    assert evaluation.outcome == "could_not_evaluate"
+    if malformed:
+        assert "malformed or unsupported" in evaluation.reason
+    elif "duration" not in facts:
+        assert evaluation.reason == "required field 'duration' is missing"
+    else:
+        assert evaluation.reason == "required field 'duration' is null"
+
+
+def test_boolean_and_empty_present_values_are_not_matched_not_uncertain():
+    assert evaluate_rule(make_rule(operator="is_true", value=None, unit=None), {"duration": False}).outcome == "not_matched"
+    assert evaluate_rule(make_rule(operator="is_false", value=None, unit=None), {"duration": True}).outcome == "not_matched"
+    assert evaluate_rule(make_rule(operator="is_not_empty", value=None, unit=None), {"duration": []}).outcome == "not_matched"
+
+
+def test_multiple_rules_preserve_matched_not_matched_and_uncertain():
+    matched = make_rule(rule_id="nc.matched", operator="greater_than", value=12)
+    not_matched = make_rule(rule_id="nc.not_matched", field="geographical_scope", operator="equals",
+                            value="worldwide", unit=None)
+    uncertain = make_rule(rule_id="nc.uncertain", field="solicitation", operator="is_true", value=None, unit=None)
+    evaluations = evaluate_all_rules(
+        "non_compete",
+        {"duration": "18 months", "geographical_scope": "local"},
+        [matched, not_matched, uncertain],
+    )
+    by_id = {item.rule_id: item.outcome for item in evaluations}
+    assert by_id == {
+        "nc.matched": "matched",
+        "nc.not_matched": "not_matched",
+        "nc.uncertain": "could_not_evaluate",
+    }
+    findings = evaluate_rules("non_compete", {"duration": "18 months", "geographical_scope": "local"},
+                              [matched, not_matched, uncertain])
+    assert [finding.rule_id for finding in findings] == ["nc.matched"]
+
+
+def test_rule_evaluation_is_deterministic():
     rule = make_rule()
-    assert not rule_matches(rule, {})
-    assert not rule_matches(rule, {"duration": None})
-    assert not rule_matches(rule, {"duration": "an extended period"})
+    facts = {"duration": None}
+    first = [evaluate_rule(rule, facts).to_dict() for _ in range(3)]
+    second = [evaluate_rule(rule, facts).to_dict() for _ in range(3)]
+    assert first == second
+    assert evaluate_all_rules("non_compete", {"duration": "18 months"}, [rule]) == evaluate_all_rules(
+        "non_compete", {"duration": "18 months"}, [rule]
+    )
 
 
 def test_evaluator_emits_structured_finding():

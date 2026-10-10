@@ -234,3 +234,40 @@ def test_unrelated_clause_rules_are_not_evaluated():
     result = detector.detect("non_compete", {"duration": "18 months"})
     assert result.findings == []
 
+
+def test_empty_retrieval_still_evaluates_applicable_rules():
+    rule = ConcernRule(
+        rule_id="nc.duration",
+        clause_type="non_compete",
+        field="duration",
+        operator="greater_than",
+        value=12,
+        unit="month",
+        finding_type="duration_review",
+        severity="high",
+        description="Duration over 12 months.",
+        source="test",
+    )
+    missing_scope = ConcernRule(
+        rule_id="nc.scope",
+        clause_type="non_compete",
+        field="geographical_scope",
+        operator="equals",
+        value="worldwide",
+        finding_type="scope_review",
+        severity="medium",
+        description="Worldwide non-compete.",
+        source="test",
+    )
+    store = InMemoryRuleStore([rule, missing_scope])
+    detector = ConcernDetector(retriever=InMemoryRuleRetriever([]), rule_store=store)
+
+    result = detector.detect("non_compete", {"duration": "18 months"})
+    assert result.retrieved_rule_ids == []
+    assert [finding.rule_id for finding in result.findings] == ["nc.duration"]
+    outcomes = {item.rule_id: item.outcome for item in result.evaluations}
+    assert outcomes == {"nc.duration": "matched", "nc.scope": "could_not_evaluate"}
+    serialized = result.to_dict()
+    assert serialized["evaluations"][0]["outcome"] in {"matched", "could_not_evaluate"}
+    assert {item["outcome"] for item in serialized["evaluations"]} == {"matched", "could_not_evaluate"}
+

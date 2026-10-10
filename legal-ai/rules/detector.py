@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Mapping, Sequence
 
@@ -15,10 +15,12 @@ engine_module = import_module("legal-ai.rules.engine")
 class DetectionResult:
     findings: list[Any]
     retrieved_rule_ids: list[str]
+    evaluations: list[Any] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {"findings": [finding.to_dict() for finding in self.findings],
-                "retrieved_rule_ids": list(self.retrieved_rule_ids)}
+                "retrieved_rule_ids": list(self.retrieved_rule_ids),
+                "evaluations": [evaluation.to_dict() for evaluation in self.evaluations]}
 
 
 def adapt_extraction_output(output: str | Mapping[str, Any]) -> dict[str, Any]:
@@ -82,13 +84,14 @@ class ConcernDetector:
         facts = adapt_extraction_output(extraction_output)
         applicable_rules = self.rule_store.get_rules_for_clause_type(clause_type)
         evidence = _evidence_by_field(facts, clause_text)
+        evaluations = engine_module.evaluate_all_rules(clause_type, facts, applicable_rules)
         findings = engine_module.evaluate_rules(
             clause_type, facts, applicable_rules, evidence=evidence
         )
         documents = []
         if self.retriever is not None and hasattr(self.retriever, "retrieve_for_facts"):
             documents = self.retriever.retrieve_for_facts(clause_type, facts, top_k=top_k)
-        return DetectionResult(findings, [document.rule_id for document in documents])
+        return DetectionResult(findings, [document.rule_id for document in documents], evaluations)
 
 
 def _evidence_by_field(facts: Mapping[str, Any], clause_text: str | None) -> dict[str, str]:
