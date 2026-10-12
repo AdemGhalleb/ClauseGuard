@@ -17,6 +17,18 @@ retrieval = import_module("legal-ai.retrieval.contract_retriever")
 detector_module = import_module("legal-ai.rules.detector")
 
 
+def _evaluate_case(detector, category: str, facts: dict[str, object]) -> tuple[bool | None, int]:
+    """Return a concern prediction only when every applicable rule was evaluated."""
+    result = detector.detect(category, facts)
+    unevaluable_rules = sum(
+        evaluation.outcome == "could_not_evaluate"
+        for evaluation in result.evaluations
+    )
+    if unevaluable_rules:
+        return None, unevaluable_rules
+    return bool(result.findings), 0
+
+
 def run_demo() -> dict[str, object]:
     """Return metrics for synthetic cases; extraction is supplied as known facts."""
     retriever = retrieval.InMemoryRuleRetriever()
@@ -34,13 +46,26 @@ def run_demo() -> dict[str, object]:
         ("confidentiality", {"duration": "five years", "exceptions": []}, False),
     ]
     detector = detector_module.ConcernDetector(retriever)
-    predictions = [bool(detector.detect(category, facts).findings) for category, facts, _ in examples]
-    expected = [label for _, _, label in examples]
+    predictions = []
+    expected = []
+    unevaluable_cases = 0
+    unevaluable_rules = 0
+    for category, facts, label in examples:
+        prediction, case_unevaluable_rules = _evaluate_case(detector, category, facts)
+        if prediction is None:
+            unevaluable_cases += 1
+            unevaluable_rules += case_unevaluable_rules
+            continue
+        predictions.append(prediction)
+        expected.append(label)
     return {
         "dataset": "synthetic demonstration cases; extracted facts are supplied",
         "recall_at_1": metrics.recall_at_k(retrieval_cases, retriever, k=1),
         "rule_metrics": metrics.binary_rule_metrics(expected, predictions),
         "cases": len(examples),
+        "evaluated_cases": len(predictions),
+        "unevaluable_cases": unevaluable_cases,
+        "unevaluable_rules": unevaluable_rules,
     }
 
 

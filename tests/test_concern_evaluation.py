@@ -41,3 +41,19 @@ def test_runnable_demo_evaluation_reports_fixture_metrics():
     assert demo["recall_at_1"] == 1.0
     assert demo["rule_metrics"] == {"tp": 3, "fp": 0, "tn": 3, "fn": 0, "accuracy": 1.0}
     assert demo["dataset"].startswith("synthetic")
+    assert demo["cases"] == 6
+    assert demo["evaluated_cases"] == 6
+    assert demo["unevaluable_cases"] == 0
+    assert demo["unevaluable_rules"] == 0
+
+
+def test_demo_case_does_not_count_unevaluable_rule_as_clean_negative():
+    demo_module = import_module("legal-ai.evaluation.run_concern_demo")
+    detector = import_module("legal-ai.rules.detector").ConcernDetector()
+
+    prediction, unevaluable_rules = demo_module._evaluate_case(
+        detector, "non_compete", {"exceptions": []}
+    )
+
+    assert prediction is None
+    assert unevaluable_rules == 1
