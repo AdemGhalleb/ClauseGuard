@@ -40,6 +40,18 @@ def test_invalid_rule_rejected(change):
         make_rule(**change)
 
 
+@pytest.mark.parametrize("overrides", [
+    {"operator": "greater_than", "value": "12", "unit": None},
+    {"operator": "contains", "value": {"term": "client"}, "unit": None},
+    {"operator": "in", "value": "worldwide", "unit": None},
+    {"operator": "is_true", "value": False, "unit": None},
+    {"operator": "is_false", "value": None, "unit": "month"},
+])
+def test_invalid_operator_operands_rejected(overrides):
+    with pytest.raises(ValueError, match="value|unit"):
+        make_rule(**overrides)
+
+
 def test_numeric_duration_match_and_non_match():
     rule = make_rule()
     assert rule_matches(rule, {"duration": "five (5) years"})
@@ -139,6 +151,21 @@ def test_operator_families_do_not_treat_insufficient_facts_as_not_matched(overri
         assert evaluation.reason == "required field 'duration' is missing"
     else:
         assert evaluation.reason == "required field 'duration' is null"
+
+
+@pytest.mark.parametrize("operator,value,expected", [
+    ("equals", {}, "worldwide"),
+    ("not_equals", {}, "local"),
+    ("is_true", "true", None),
+    ("is_false", "false", None),
+])
+def test_scalar_and_boolean_operators_reject_malformed_extracted_values(
+    operator, value, expected
+):
+    rule = make_rule(operator=operator, value=expected, unit=None)
+    evaluation = evaluate_rule(rule, {"duration": value})
+    assert evaluation.outcome == "could_not_evaluate"
+    assert "malformed or unsupported" in evaluation.reason
 
 
 def test_boolean_and_empty_present_values_are_not_matched_not_uncertain():
@@ -285,4 +312,3 @@ def test_in_memory_rule_store_defaults_to_all_fixture_rules():
     nc_rules = store.get_rules_for_clause_type("non_compete")
     assert len(nc_rules) == 1
     assert nc_rules[0].rule_id == "demo.non_compete.duration_over_12_months"
-

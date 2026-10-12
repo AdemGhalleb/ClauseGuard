@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping as ABCMapping, Sequence as ABCSequence, Set as ABCSet
 from dataclasses import dataclass, replace
+from numbers import Real
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
@@ -24,6 +26,33 @@ EXCEPTION_NOT_EXTRACTED = "not_extracted"
 EXCEPTION_EMPTY = "empty"
 EXCEPTION_COULD_NOT_EVALUATE = "could_not_evaluate"
 EXCEPTION_EXTRACTED_UNVERIFIED = "extracted_unverified"
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool)
+
+
+def _validate_rule_operand(operator: str, value: Any, unit: str | None) -> None:
+    if operator in {"is_true", "is_false", "is_not_empty"}:
+        if value is not None:
+            raise ValueError(f"value must be omitted for {operator}")
+        if unit is not None:
+            raise ValueError(f"unit is not supported for {operator}")
+        return
+    if value is None:
+        raise ValueError(f"value is required for {operator}")
+    if isinstance(value, ABCMapping):
+        raise ValueError(f"value must not be a mapping for {operator}")
+    if unit is not None or operator in {
+        "greater_than", "greater_than_or_equal", "less_than", "less_than_or_equal"
+    }:
+        if not _is_number(value):
+            raise ValueError(f"value must be numeric for {operator}")
+    elif operator == "contains" and isinstance(value, (str, bytes)):
+        pass
+    elif operator == "in":
+        if not isinstance(value, (ABCSequence, ABCSet)) or isinstance(value, (str, bytes)):
+            raise ValueError("value must be a collection for in")
 
 
 @dataclass(frozen=True)
@@ -50,10 +79,9 @@ class ConcernRule:
             raise ValueError(f"unsupported operator: {self.operator}")
         if self.severity not in SEVERITIES:
             raise ValueError(f"unsupported severity: {self.severity}")
-        if self.operator not in {"is_true", "is_false", "is_not_empty"} and self.value is None:
-            raise ValueError(f"value is required for {self.operator}")
         if self.unit is not None and self.unit not in {"day", "month", "year"}:
             raise ValueError("unit must be day, month, or year")
+        _validate_rule_operand(self.operator, self.value, self.unit)
 
     @property
     def rule_condition(self) -> str:
@@ -175,6 +203,24 @@ def _evaluate_condition(rule: ConcernRule, facts: Mapping[str, Any]) -> RuleEval
     try:
         if rule.unit:
             actual = _duration_value(actual, rule.unit)
+        elif op in {"equals", "not_equals"} and isinstance(actual, ABCMapping):
+            raise TypeError("mapping is not a supported scalar value")
+        elif op in {"is_true", "is_false"} and not isinstance(actual, bool):
+            raise TypeError("boolean value required")
+        elif op in {
+            "greater_than", "greater_than_or_equal", "less_than", "less_than_or_equal"
+        } and not _is_number(actual):
+            raise TypeError("numeric value required")
+        elif op == "contains":
+            if isinstance(actual, ABCMapping) or isinstance(expected, ABCMapping):
+                raise TypeError("mapping is not a supported containment value")
+            if isinstance(actual, (str, bytes)) and not isinstance(expected, type(actual)):
+                raise TypeError("containment value types do not match")
+            if not isinstance(actual, (str, bytes, ABCSequence, ABCSet)):
+                raise TypeError("sequence or string value required")
+        elif op == "in":
+            if isinstance(actual, ABCMapping) or not isinstance(expected, (ABCSequence, ABCSet)):
+                raise TypeError("membership values are malformed")
         if op == "equals":
             matched = actual == expected
         elif op == "not_equals":
@@ -336,4 +382,3 @@ class InMemoryRuleStore:
     def get_rules_for_clause_type(self, clause_type: str) -> list[ConcernRule]:
         """Return all configured rules applicable to a clause type."""
         return [rule for rule in self.rules if rule.clause_type == clause_type]
-
