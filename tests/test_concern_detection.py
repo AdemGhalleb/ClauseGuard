@@ -277,6 +277,161 @@ def test_empty_retrieval_still_evaluates_applicable_rules():
     outcomes = {item.rule_id: item.outcome for item in result.evaluations}
     assert outcomes == {"nc.duration": "matched", "nc.scope": "could_not_evaluate"}
     serialized = result.to_dict()
-    assert serialized["evaluations"][0]["outcome"] in {"matched", "could_not_evaluate"}
-    assert {item["outcome"] for item in serialized["evaluations"]} == {"matched", "could_not_evaluate"}
+    serialized_evaluations = {
+        item["rule_id"]: item["outcome"] for item in serialized["evaluations"]
+    }
+    assert serialized_evaluations == {
+        "nc.duration": "matched",
+        "nc.scope": "could_not_evaluate",
+    }
 
+
+def test_missing_fact_serialization_preserves_exact_uncertainty():
+    rule = ConcernRule(
+        rule_id="nc.duration",
+        clause_type="non_compete",
+        field="duration",
+        operator="greater_than",
+        value=12,
+        unit="month",
+        finding_type="duration_review",
+        severity="high",
+        description="Duration over 12 months.",
+        source="test",
+    )
+    result = ConcernDetector(rule_store=InMemoryRuleStore([rule])).detect(
+        "non_compete", {}
+    ).to_dict()
+
+    assert result["findings"] == []
+    assert result["evaluations"] == [{
+        "rule_id": "nc.duration",
+        "clause_type": "non_compete",
+        "field": "duration",
+        "outcome": "could_not_evaluate",
+        "reason": "required field 'duration' is missing",
+        "extracted_value": None,
+        "exception_status": "not_extracted",
+        "exception_field": "exceptions",
+        "exception_value": None,
+    }]
+
+
+def test_exception_metadata_survives_detector_serialization():
+    rule = ConcernRule(
+        rule_id="nc.duration",
+        clause_type="non_compete",
+        field="duration",
+        operator="greater_than",
+        value=12,
+        unit="month",
+        finding_type="duration_review",
+        severity="high",
+        description="Duration over 12 months.",
+        source="test",
+    )
+    result = ConcernDetector(rule_store=InMemoryRuleStore([rule])).detect(
+        "non_compete",
+        {"duration": "five years", "exceptions": ["written consent"]},
+    ).to_dict()
+
+    assert result["findings"] == [{
+        "rule_id": "nc.duration",
+        "clause_type": "non_compete",
+        "finding_type": "duration_review",
+        "severity": "high",
+        "field": "duration",
+        "extracted_value": "five years",
+        "rule_condition": "duration > 12 months",
+        "explanation": (
+            "The extracted value for duration matches a configured review criterion. "
+            "This is a potential concern according to the configured review policy. "
+            "An extracted exception is present, but its applicability has not been "
+            "established and it does not dismiss this finding."
+        ),
+        "evidence": "five years",
+        "source": "test",
+        "exception_status": "extracted_unverified",
+        "exception_field": "exceptions",
+        "exception_value": ["written consent"],
+    }]
+    assert result["evaluations"][0]["exception_status"] == "extracted_unverified"
+    assert result["evaluations"][0]["exception_value"] == ["written consent"]
+
+
+def test_top_k_only_changes_supplementary_retrieval_metadata():
+    rule_match = ConcernRule(
+        rule_id="nc.match",
+        clause_type="non_compete",
+        field="duration",
+        operator="greater_than",
+        value=12,
+        unit="month",
+        finding_type="duration_review",
+        severity="high",
+        description="Duration over 12 months.",
+        source="test",
+    )
+    rule_no_match = ConcernRule(
+        rule_id="nc.no_match",
+        clause_type="non_compete",
+        field="duration",
+        operator="greater_than",
+        value=36,
+        unit="month",
+        finding_type="duration_review",
+        severity="high",
+        description="Duration over 36 months.",
+        source="test",
+    )
+    retriever = InMemoryRuleRetriever([
+        _make_rule_doc(rule_match, "non_compete duration 18 months"),
+        _make_rule_doc(rule_no_match, "unrelated policy text"),
+    ])
+    detector = ConcernDetector(retriever=retriever)
+    results = [
+        detector.detect("non_compete", {"duration": "18 months"}, top_k=top_k).to_dict()
+        for top_k in (0, 1, 5)
+    ]
+
+    assert [result["retrieved_rule_ids"] for result in results] == [
+        [], ["nc.match"], ["nc.match", "nc.no_match"]
+    ]
+    assert results[0]["findings"] == results[1]["findings"] == results[2]["findings"]
+    assert results[0]["evaluations"] == results[1]["evaluations"] == results[2]["evaluations"]
+
+
+def test_retrieval_metadata_cannot_replace_rule_store_evaluation():
+    configured = ConcernRule(
+        rule_id="nc.configured",
+        clause_type="non_compete",
+        field="duration",
+        operator="greater_than",
+        value=12,
+        unit="month",
+        finding_type="duration_review",
+        severity="high",
+        description="Configured duration criterion.",
+        source="configured",
+    )
+    retrieved_only = ConcernRule(
+        rule_id="nc.retrieved",
+        clause_type="non_compete",
+        field="duration",
+        operator="greater_than",
+        value=36,
+        unit="month",
+        finding_type="duration_review",
+        severity="high",
+        description="Retrieved duration criterion.",
+        source="retrieved",
+    )
+    retriever = InMemoryRuleRetriever([_make_rule_doc(retrieved_only, "duration")])
+    result = ConcernDetector(
+        retriever=retriever,
+        rule_store=InMemoryRuleStore([configured]),
+    ).detect("non_compete", {"duration": "18 months"}).to_dict()
+
+    assert result["retrieved_rule_ids"] == ["nc.retrieved"]
+    assert [item["rule_id"] for item in result["evaluations"]] == ["nc.configured"]
+    assert [item["rule_id"] for item in result["findings"]] == ["nc.configured"]

@@ -168,6 +168,28 @@ def test_scalar_and_boolean_operators_reject_malformed_extracted_values(
     assert "malformed or unsupported" in evaluation.reason
 
 
+@pytest.mark.parametrize("operator,value,expected", [
+    ("greater_than", "eighteen months", 12),
+    ("greater_than_or_equal", {}, 12),
+    ("less_than", [], 12),
+    ("less_than_or_equal", "unknown", 12),
+    ("contains", {}, "client"),
+    ("in", {}, ["worldwide"]),
+])
+def test_all_operator_families_reject_incompatible_extracted_values(
+    operator, value, expected
+):
+    rule = make_rule(operator=operator, value=expected, unit=None)
+    evaluation = evaluate_rule(rule, {"duration": value})
+    assert evaluation.outcome == "could_not_evaluate"
+    assert "malformed or unsupported" in evaluation.reason
+
+
+def test_invalid_configured_operand_does_not_become_extracted_uncertainty():
+    with pytest.raises(ValueError, match="numeric"):
+        make_rule(operator="greater_than", value="twelve", unit=None)
+
+
 def test_boolean_and_empty_present_values_are_not_matched_not_uncertain():
     assert evaluate_rule(make_rule(operator="is_true", value=None, unit=None), {"duration": False}).outcome == "not_matched"
     assert evaluate_rule(make_rule(operator="is_false", value=None, unit=None), {"duration": True}).outcome == "not_matched"
